@@ -1,0 +1,320 @@
+---
+title: "Boston Housing Price Prediction"
+author: "Pandiyarajan A"
+date: "June 04, 2019"
+output: 
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+---
+
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE,echo=FALSE}
+
+if(!require(gbm)) install.packages("gbm", repos = "http://cran.us.r-project.org")
+if(!require(MASS)) install.packages("MASS", repos = "http://cran.us.r-project.org")
+
+library(purrr)
+library(ggplot2)
+library(knitr)
+library(magrittr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(kableExtra)
+library(stringr)
+library(gridExtra)
+library(grid)
+library(corrr)
+library(caret)
+```
+\newpage
+# Overview
+
+This project is second part of the course Data Science: Capstone HardvardX PH125.9x, impart by HarvardX. We have the opportunity to use dataset to solve the problem of our choice. 
+
+## Introduction
+
+Each record in the database describes a Boston suburb or town. The data was drawn from the Boston Standard Metropolitan Statistical Area (SMSA) in 1970. 
+
+## Aim of the Project
+
+We could perform two tasks,
+
+* Nitrous oxide level prediction, ***nox*** 
+* Median value of a home is to be prediction, ***medv*** 
+  
+We shall do any one of these two, so we predict *Median Value of a Home (medv)* in this project.
+
+# Data Exploration
+## Dataset
+The data was originally published by Harrison, D. and Rubinfeld, D.L. `Hedonic prices and the demand for clean air', J. Environ. Economics & Management, vol.5, 81-102, 1978.
+
+The dataset is loaded from MASS package (Modern Applied Statistics with S). The dataset is small in size with only 506 observations and 14 features.
+
+I have used a small data set due to computational limitation of my computer.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
+names(Boston)
+```
+
+Feature names in Boston dataset
+
+Abbr.  | Description
+-------|------------------------------------------------------------------------
+crim   |  per capita crime rate by town
+zn     |  proportion of residential land zoned for lots over 25,000 sq.ft.
+indus  |  proportion of non-retail business acres per town
+chas   |  Charles River dummy variable (= 1 if tract bounds river; 0 otherwise)
+nox    |  nitric oxides concentration (parts per 10 million)
+rm     |  average number of rooms per dwelling
+age    |  proportion of owner-occupied units built prior to 1940
+dis    |  weighted distances to five Boston employment centres
+rad    |  index of accessibility to radial highways
+tax    |  full-value property-tax rate per $10,000
+ptratio|  pupil-teacher ratio by town
+black  |  1000(Bk - 0.63)^2 where Bk is the proportion of blacks by town
+lstat  |  % lower status of the population
+medv   |  Median value of owner-occupied homes in $1000's
+
+
+## Data Analysis
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+Boston %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram(bins = 30)
+
+```
+
+We can see that some variables have an exponential distribution, such as ***crim***, ***zn***, ***age*** and ***black***. And also we could observe that ***rad*** and ***tax*** have a bimodal distribution.
+
+Distribution | Features
+-------------|-----------------
+Exponential  | crim, zn, age and black
+Bimodal      | rad and tax
+Normal       | rm, lstat, ptratio, and medv
+
+### Correlation of Features
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+Boston %>%
+  gather(-medv, key = "var", value = "value") %>%
+  ggplot(aes(x = value, y = medv)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  facet_wrap(~ var, scales = "free") +
+  ylab('Price')
+```
+We can observe ***medv*** (price) has high positive relation with ***rm*** and negative correlation with ***lstat***, ***ptratio***. The same can be observed in the below plotted correlation graph. 
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align='left', fig.width=6, fig.height=3.5}
+Boston %>%  correlate() %>% rplot()
+```
+
+
+### Inferences
+
+We could see that,
+
+* Increase in ***rm*** value increases ***medv*** value ie price of the home. 
+* Lower the value of ***lstat*** higher the value of ***medv*** (price)
+* ***ptratio*** decrease in the value increases ***medv***  (price)
+
+# Prediction System
+
+## Cost Function
+We use RMSE ( Root Mean Squared Error) to validate the performance.
+
+```{r}
+RMSE <- function(actual,predicted){
+  sqrt(mean((actual-predicted)^2))
+}
+```
+
+## Data Wrangling
+
+As per our analysis '***rm***', '***lstat***', '***ptratio***', and '***medv***' are essential. So lets remove rest of the features for better results.
+
+```{r warning=FALSE, message=FALSE}
+boston <- Boston %>% select(rm,lstat,ptratio,medv)
+```
+
+#### Data Preparation
+
+We partition our data into 3 segments Train, Test and Validation data sets.
+
+```{r echo=FALSE}
+set.seed(2019)
+
+validation_index <- createDataPartition(y=boston$medv,times = 1, p = 0.1, list = FALSE)
+boston_data_set <- boston[-validation_index,]
+validation_set <-  boston[validation_index,]
+
+# Test and Train set
+test_index <- createDataPartition(y=boston_data_set$medv,times = 1, p = 0.1, list = FALSE)
+train_set <- boston_data_set[-test_index,]
+test_set <- boston_data_set[test_index,]
+
+```
+## Naive Model
+
+In this model we use mean of the ***medv*** as predicted value and evaluate the cost value.
+
+```{r}
+mu_train <- mean(train_set$medv)
+naive_rmse <- RMSE(test_set$medv, mu_train)
+rmse_results <- tibble(method = "Naive model", RMSE = naive_rmse) 
+rmse_results %>% knitr::kable()
+```
+
+## Linear Regression Model
+
+### Modeling
+
+The aim of linear regression is to model a continuous variable Y as a mathematical function of one or more X variable(s), so that we can use this regression model to predict the Y when only the X is known. This mathematical equation can be generalized as follows:
+
+$$ Y = \beta_0 + \beta_1 X + e $$
+
+where, $\beta$~0~ is the intercept and $\beta$~1~ is the slope. e is the error term.
+
+We can implement the same using the function ```lm()```. 
+
+```{r}
+
+linear_model <- lm(medv~.,data=train_set) 
+
+prediction = predict(linear_model, test_set[, 1:3])
+
+```
+
+### Evaluation
+
+Evaluating the Linear Model performance using RMSE cost function
+
+```{r }
+lm_rmse <- RMSE(test_set$medv,prediction)
+```
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+rmse_results <- bind_rows(rmse_results, 
+                          tibble(method = "Linear regression Model", RMSE = lm_rmse) ) 
+
+rmse_results %>% knitr::kable()
+```
+
+The rmse value is lesser compared to previous naive model using average.
+
+Lets now implement more advanced model and compare the performance with the other two models we have evaluated.
+
+## Gradient Boosting Model
+
+Gradient Boosting is one of the famous ensemble learning model. Our aim is to reduce the high variance of learners by averaging lots of models fitted on bootstrapped data samples generated with replacement from training data, so as to avoid overfitting.
+
+Our model has 3 main hyper parameters ***trees*** and the shrinkage parameter ***lambda=0.01*** (sort of learning rate). ***d*** is the interaction depth, total splits we need for each tree.
+
+### Modeling
+```{r}
+gradient_boost <- gbm(medv ~ . ,data = train_set, distribution = "gaussian", 
+                     n.trees = 10000, shrinkage = 0.01,  interaction.depth = 4)
+
+```
+
+we could get the Relative Influence of features
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.height=3.5}
+summary(gradient_boost)
+```
+
+Tuning the hyperparameters. Lets find the optimal tree size required for our dataset.
+
+```{r warning=FALSE, message=FALSE}
+# Number of trees-a vector of 100 values 
+n.trees = seq(from=100 ,to=10000, by=100) 
+```
+Prediction for each Tree
+```{r}
+pred_matrix <- predict(gradient_boost, test_set[, 1:3],n.trees = n.trees)
+```
+
+### Evaluation
+
+Here we evaluate the rmse value for 100 tree sizes, ranging from 100 to 10000. We pick the tree size which produces lower rmse value.
+
+```{r warning=FALSE, message=FALSE}
+rmses <- apply(pred_matrix,2,function(p){
+  RMSE(test_set$medv,p)
+})
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+plot(n.trees , rmses , pch=19, col="blue",xlab="Number of Trees",ylab="Test Error", main = "Perfomance of Boosting on Test Set")
+
+abline(h = min(rmses),col="red") 
+legend("topright",c("Minimum Test error Line for Random Forests"),col="red",lty=1,lwd=1)
+```
+
+Below is the lowest rmse value obtained from range of tree sizes.
+
+```{r echo=FALSE, error=FALSE, warning=FALSE}
+# Optimal tree size 
+# Lowest RMSE value
+gbm_rmse <- rmses[which.min(rmses)]
+gbm_rmse
+```
+
+We could see this model performs relativily better than the other two.
+
+```{r echo=FALSE, error=FALSE, warning=FALSE}
+rmse_results <- bind_rows(rmse_results, tibble(method = "Gradient Boosting Model (GBM)", RMSE = gbm_rmse))
+
+rmse_results %>% knitr::kable()
+
+```
+
+# Results
+
+Comparing the three models, Gradient Boosting Model (GBM) has better performance with our dataset.
+
+```{r echo=FALSE, error=FALSE, warning=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+Lets use our Model on the Validation set and check for the performance.
+
+```{r }
+# Generate model with best n.trees
+gradient_boost <- gbm(medv ~ . ,data = train_set, distribution = "gaussian", 
+                      n.trees = n.trees[which.min(rmses)], 
+                      shrinkage = 0.01, 
+                      interaction.depth = 4)
+
+prediction <- predict(gradient_boost, 
+                      validation_set[, 1:3], 
+                      n.trees = gradient_boost$n.trees)
+
+v_gbm_rmse <- RMSE(validation_set$medv,prediction)
+
+```
+
+This error is much lower that the test set error. 
+
+```{r echo=FALSE, error=FALSE, warning=FALSE}
+rmse_results <- bind_rows(rmse_results, tibble(method = "Gradient Boosting Model (GBM) with Validation set", RMSE = v_gbm_rmse))
+rmse_results %>% knitr::kable()
+```
+
+The predicted ***medv*** (Median value of owner-occupied homes) value using Gradient boosting model could vary $\pm$ `$`3,969.64 from the actual value.
+
+# Conclusion
+
+From the above analysis and prediction using various models we could say ensemble model performs better than the simple linear model and naive model(average). Ensembling techniques are good and tend to outperform a single learner which is prone to either overfitting or underfitting. Choosing models which fits the dataset and tuning the parameters to increase its performance can produce a better and stronger model. 
+
+I hope that I have provided all the necessary details to make this report understandable and computationally reproducible.
+
+___
