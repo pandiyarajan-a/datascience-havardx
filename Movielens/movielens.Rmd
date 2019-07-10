@@ -1,0 +1,330 @@
+---
+title: "Movielens - HarvardX PH125.9x Capstone Assignment"
+author: "Pandiyarajan A"
+date: "24 May 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, cache=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+```{r echo=FALSE, cache=TRUE, message=FALSE, warning=FALSE}
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind = "Rounding") # if using R 3.6.0: set.seed(1, sample.kind = "Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+# Movielens recommendation system.
+
+## Movielens Data Overview
+
+This data set consists of _9,000,055 ratings_ from _69,878 users_ on _10,677 movies_. We will now analyse the data and build a recommendation system with low RMSE value.
+
+```{r message=FALSE}
+library(tidyverse)
+library(caret)
+library(dplyr)
+
+edx %>% summarize(users = n_distinct(userId), movies = n_distinct(movieId), ratings = n()) %>% knitr::kable()
+```
+
+### Approaches
+  + Data Exploration
+  + Data Preparation for Analysis 
+  + Define Loss Fucntion
+  + Checking for Bias and Approximating
+  + Regularization
+
+## Data Exploration
+
+As the data set we have is well formated and tidy, we may not require data scubbing / data cleaning.
+lets now dive in and start exploring the data and lets see if we can make any insigths that could help us model a better system.
+
+### Rating Distribution
+
+```{r fig.height=3}
+edx %>% 
+  group_by(userId) %>% 
+  summarize(avg_rating = mean(rating)) %>% 
+  ggplot(aes(avg_rating)) + geom_histogram(bins = 30, color = "grey") + xlab(label = "Ratings") + ylab(label = "Rating Count")
+```
+
+We could see the most of the movies are rated around approximatly _3.5_. However we could get decide between median, mean and mode based on the problem we are solving.
+
+```{r echo=FALSE}
+mu_train <- mean(edx$rating)
+```
+
+
+```{r}
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+edx %>% summarize(mean = mean(rating), median = median(rating), mode = getmode(rating)) %>% knitr::kable()
+```
+
+As we see with our data set the median, mode are equal and mean is a near by value. Moving further I will use the mean value for futher calculations.
+
+### Ratings by Movies
+```{r fig.height=3}
+edx %>% 
+  dplyr::count(movieId) %>%
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "grey") + 
+  scale_x_log10() + 
+  ggtitle("Ratings by Movies")
+```
+We see movies are rated more/less number of times than the others. This may be because of the popularity factor.
+
+### Ratings by Users
+
+```{r fig.height=3 }
+edx %>% 
+  dplyr::count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "grey") + 
+  scale_x_log10() + 
+  ggtitle("Ratings by Users")
+```
+
+Here we observe the user rating behaviour. Users rate more/less number of movies than the other users.    
+
+
+## Loss Function
+
+We will be using Root mean squared error RMSE as our loss function as per instruction.
+
+```{r echo=TRUE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+## Data Preparation for Analysis
+
+For further analysis lets split the data into **train** and **test** sets. We use ***createDataPartition*** method to do the job. We take _75% for training_ and _25% for testing_.
+
+```{r include=TRUE, echo=TRUE}
+
+set.seed(2019)
+
+test_index <-
+  createDataPartition(
+    y = edx$rating,
+    times = 1,
+    p = 0.25,
+    list = FALSE
+  )
+
+edx_test <- edx[test_index,]   # test set 25% of edx
+edx_train <- edx[-test_index,] # train set 75% of edx
+
+edx_test <- edx_test %>% 
+  semi_join(edx_test, by = "movieId") %>%
+  semi_join(edx_test, by = "userId")
+
+```
+
+## Checking for Bias and Approximating  
+
+We estimate the movie effect and user effect by taking the average of the residuals obtained after removing the overall mean and the movie effect from the ratings.
+
+```{r echo=TRUE}
+
+movie_avgs <- edx_train %>% group_by(movieId) %>% summarize(b_i = mean(rating - mu_train))
+user_avgs <- edx_train %>% left_join(movie_avgs,'movieId') %>% 
+  group_by(userId) %>% summarize(b_u = mean(rating - mu_train - b_i)) 
+
+predicted_ratings_muem <-  edx_test %>% 
+  left_join(movie_avgs,'movieId') %>%
+  left_join(user_avgs, 'userId') %>% mutate(pred = mu_train + b_i + b_u) %>% .$pred
+
+predicted_ratings_muem[is.na(predicted_ratings_muem)] <- 0
+```
+
+By fixing the biasing the calculated **RMSE** is 
+
+```{r}
+RMSE(edx_test$rating, predicted_ratings_muem)
+```
+
+With our estimates lets find the best _10 movies_.
+
+```{r}
+movie_titles <- edx_train %>% select(movieId, title) %>% distinct()
+
+edx_train %>% dplyr::count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(desc(b_i)) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable()
+```
+
+With our estimates lets find the Worst _10 movies_.
+
+```{r}
+edx_train %>% dplyr::count(movieId) %>% 
+  left_join(movie_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(b_i) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable()
+```
+
+These results are not convincing as we know these are not the best and worst 10 movies from our knowledge on movies. These are because we could see that these are rated very few time and it happens that they have been rated very high and low.  
+
+To over come this issue lets regularize the data. This could help us improve reduce the RMSE value.
+
+## Regularization
+
+Identifying the best regularization parameter.
+
+```{r echo=FALSE}
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(lambda){
+  
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu_train)/(n() + lambda), n_i = n() )
+  
+  b_u <- edx_train %>% group_by(userId) %>% 
+    left_join(b_i, by="movieId") %>%
+    summarize(b_u = sum(rating - mu_train - b_i) / (n() + lambda), n_i = n() )
+  
+  prediction_mra <- edx_test %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    mutate(pred = mu_train + b_i + b_u ) %>% .$pred
+  
+  prediction_mra[is.na(prediction_mra)] <- 0
+  
+  return(RMSE(edx_test$rating,prediction_mra))
+})
+```
+
+> Estimating the best normalization value (lambda) 
+
+```{r fig.height=3, fig.width=5, fig.align="left"}
+qplot(lambdas, rmses)  
+```
+
+#### Optimal lambda
+
+```{r} 
+opt_lambda <- lambdas[which.min(rmses)] # optimal lambda
+opt_lambda
+```
+
+> Effect of Regularization
+
+```{r echo=FALSE}
+movie_reg_avgs <- edx_train %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu_train)/(n()+opt_lambda), n_i = n()) 
+
+tibble(original = movie_avgs$b_i, 
+           regularlized = movie_reg_avgs$b_i, 
+           n = movie_reg_avgs$n_i) %>%
+  ggplot(aes(original, regularlized, size=sqrt(n))) + 
+  geom_point(shape=1, alpha=0.5)
+```
+
+## Result
+
+The best lowest error value (**RMSE**) obtained after fixing the user, movie bias and regularization is  
+
+```{r echo=FALSE}
+
+b_i <- edx_train %>% group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu_train)/(n() + opt_lambda), n_i = n() )
+
+b_u <- edx_train %>% group_by(userId) %>% 
+  left_join(b_i, by="movieId") %>%
+  summarize(b_u = sum(rating - mu_train - b_i) / (n() + opt_lambda), n_i = n() )
+
+prediction_mra <- edx_test %>% 
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  mutate(pred = mu_train + b_i + b_u ) %>% .$pred
+
+prediction_mra[is.na(prediction_mra)] <- 0
+
+RMSE(edx_test$rating,prediction_mra)
+
+```
+#### We have reduced the **RMSE** to a great extent.
+
+With our updated estimates lets find the best _10 movies_.
+
+```{r}
+edx_train %>%
+  dplyr::count(movieId) %>% 
+  left_join(movie_reg_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(desc(b_i)) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable()
+```
+
+With our updated estimates lets find the Worst _10 movies_.
+
+```{r}
+edx_train %>%
+  dplyr::count(movieId) %>% 
+  left_join(movie_reg_avgs) %>%
+  left_join(movie_titles, by="movieId") %>%
+  arrange(b_i) %>% 
+  select(title, b_i, n) %>% 
+  slice(1:10) %>% 
+  knitr::kable()
+```
+
+#### This is much better and convincing.
+
+## Conclusion
+
+I hope that I have provided all the necessary details to make this report understandable and computationally reproducible. Thanks for taking the time to review my work and best wishes to you with Data Science!
+
+___
